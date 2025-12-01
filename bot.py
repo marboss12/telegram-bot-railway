@@ -13,7 +13,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'dating_bot.db')
 
 # Токен бота - БУДЕТ ВЗЯТ ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ
 import os
-BOT_TOKEN = os.environ.get('BOT_TOKEN', 'ВАШ_ТОКЕН_ЗДЕСЬ')
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
 # ========== ОСТАЛЬНОЙ ВАШ КОД БЕЗ ИЗМЕНЕНИЙ ==========
 class DatingBot:
