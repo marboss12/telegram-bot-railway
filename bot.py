@@ -12,8 +12,15 @@ from telegram.ext import (
 DB_PATH = os.path.join(os.path.dirname(__file__), 'dating_bot.db')
 
 # Токен бота - БУДЕТ ВЗЯТ ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ
-import os
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
+
+# КРИТИЧЕСКАЯ ПРОВЕРКА ТОКЕНА!
+if not BOT_TOKEN:
+    print("=" * 50)
+    print("❌ ОШИБКА: BOT_TOKEN не установлен!")
+    print("✅ Установите переменную BOT_TOKEN в Railway!")
+    print("=" * 50)
+    exit(1)  # Завершаем программу
 
 # ========== ОСТАЛЬНОЙ ВАШ КОД БЕЗ ИЗМЕНЕНИЙ ==========
 class DatingBot:
@@ -35,19 +42,18 @@ class DatingBot:
         logging.info("✅ База данных создана!")
     
     # ... ВСТАВЬТЕ ВЕСЬ ВАШ ОСТАЛЬНОЙ КОД ЗДЕСЬ ...
-    # Все ваши методы: start, handle_message, и т.д.
     
     def run(self):
         """Запуск бота"""
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # ... ВАШИ ОБРАБОТЧИКИ ...
-        
         # НАСТРОЙКА ЛОГГИРОВАНИЯ ДЛЯ RAILWAY
         logging.basicConfig(
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             level=logging.INFO
         )
+        
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # ... ВАШИ ОБРАБОТЧИКИ ...
         
         print("=" * 50)
         print("🤖 БОТ ЗАПУЩЕН НА RAILWAY!")
@@ -58,4 +64,3 @@ class DatingBot:
 if __name__ == "__main__":
     bot = DatingBot()
     bot.run()
-
