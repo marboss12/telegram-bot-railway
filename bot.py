@@ -13,8 +13,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Токен бота - ЗАМЕНИТЕ на свой!
-BOT_TOKEN = "8411541572:AAGkjiu7gzQ_1UkxENqgQCLVXJpq6qEWqqU"
+
 
 class DatingBot:
     def __init__(self):
