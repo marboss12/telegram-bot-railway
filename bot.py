@@ -13,7 +13,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
 class DatingBot:
     def __init__(self):
