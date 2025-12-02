@@ -15,6 +15,23 @@ logging.basicConfig(
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
+# Список факультетов
+FACULTIES = {
+    "ФН": "Фундаментальные науки",
+    "РЛ": "Радиолокация и радионавигация",
+    "РК": "Ракетно-космическая техника",
+    "ИБМ": "Инженерный бизнес и менеджмент",
+    "ИУ": "Информатика и системы управления", 
+    "СМ": "Специальное машиностроение",
+    "МТ": "Машиностроительные технологии",
+    "Э": "Энергомашиностроение",
+    "Л": "Лингвистика",
+    "БМТ": "Биомедицинская техника",
+    "СГН": "Социальные и гуманитарные науки",
+    "ГУИМЦ": "Головной учебно-исследовательский и методический центр",
+    "ЮР": "Юриспруденция"
+}
+
 class DatingBot:
     def __init__(self):
         self.db_name = 'dating_bot.db'
@@ -76,6 +93,21 @@ class DatingBot:
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+    def get_faculty_keyboard(self):
+        """Клавиатура выбора факультета"""
+        # Создаем 3 колонки для лучшего отображения
+        buttons = []
+        faculty_codes = list(FACULTIES.keys())
+        
+        # Разбиваем на строки по 3 элемента
+        for i in range(0, len(faculty_codes), 3):
+            row = []
+            for code in faculty_codes[i:i+3]:
+                row.append(InlineKeyboardButton(code, callback_data=f"faculty_{code}"))
+            buttons.append(row)
+        
+        return InlineKeyboardMarkup(buttons)
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         user = update.effective_user
@@ -118,6 +150,13 @@ class DatingBot:
             await self.show_my_profile(update, context)
         elif text == "❌ Удалить анкету":
             await self.delete_profile(update, context)
+        elif update.message.chat.id in self.user_states:
+            # Обработка состояний при создании анкеты
+            state = self.user_states[update.message.chat.id]['step']
+            if state == 'waiting_age':
+                await self.handle_age(update, context)
+            elif state == 'waiting_bio':
+                await self.handle_bio(update, context)
 
     async def start_create_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начало создания анкеты"""
@@ -168,11 +207,21 @@ class DatingBot:
         
         user_id = query.from_user.id
         
+        if user_id not in self.user_states:
+            return
+            
         if query.data.startswith('gender_'):
             gender = query.data.split('_')[1]
             self.user_states[user_id]['gender'] = gender
             self.user_states[user_id]['step'] = 'waiting_age'
             await query.edit_message_text("📅 Введите ваш возраст:")
+            
+        elif query.data.startswith('faculty_'):
+            faculty_code = query.data.split('_')[1]
+            faculty_name = FACULTIES.get(faculty_code, faculty_code)
+            self.user_states[user_id]['faculty'] = faculty_name
+            self.user_states[user_id]['step'] = 'waiting_bio'
+            await query.edit_message_text(f"✅ Выбран факультет: {faculty_name}\n\n✏️ Теперь напишите информацию о себе (максимум 500 символов):")
 
     async def handle_age(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик ввода возраста"""
@@ -188,9 +237,12 @@ class DatingBot:
                 return
                 
             self.user_states[user_id]['age'] = age
-            self.user_states[user_id]['step'] = 'waiting_bio'
+            self.user_states[user_id]['step'] = 'waiting_faculty'
             
-            await update.message.reply_text("✏️ Напишите информацию о себе (максимум 500 символов):")
+            await update.message.reply_text(
+                "🎓 Выберите ваш факультет:",
+                reply_markup=self.get_faculty_keyboard()
+            )
             
         except ValueError:
             await update.message.reply_text("Пожалуйста, введите число:")
@@ -215,7 +267,14 @@ class DatingBot:
         cursor.execute('''
             INSERT INTO profiles (user_id, photo_id, gender, faculty, age, bio)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, profile_data['photo_id'], profile_data['gender'], "Не указан", profile_data['age'], bio))
+        ''', (
+            user_id, 
+            profile_data['photo_id'], 
+            profile_data['gender'], 
+            profile_data['faculty'], 
+            profile_data['age'], 
+            bio
+        ))
         conn.commit()
         conn.close()
         
@@ -411,7 +470,7 @@ class DatingBot:
         
         # Находим взаимные лайки
         cursor.execute('''
-            SELECT u.username, u.first_name, p.bio 
+            SELECT u.username, u.first_name, p.faculty, p.bio 
             FROM likes l1
             JOIN likes l2 ON l1.to_profile_id = l2.to_profile_id
             JOIN profiles p ON l2.from_user_id = p.user_id
@@ -433,9 +492,10 @@ class DatingBot:
         
         match_text = "💝 Ваши мэтчи:\n\n"
         for match in matches:
-            username, first_name, bio = match
+            username, first_name, faculty, bio = match
             name = first_name or username or "Пользователь"
             match_text += f"👤 {name}\n"
+            match_text += f"🎓 Факультет: {faculty}\n"
             match_text += f"📝 {bio}\n"
             match_text += f"💬 Написать: @{username}\n\n" if username else "\n"
         
@@ -506,11 +566,8 @@ class DatingBot:
         
         # Обработчики callback-запросов
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern="^gender_"))
+        application.add_handler(CallbackQueryHandler(self.handle_callback, pattern="^faculty_"))
         application.add_handler(CallbackQueryHandler(self.handle_like, pattern="^(like|dislike|skip)$"))
-        
-        # Обработчики для создания анкеты
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_age), group=1)
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bio), group=2)
 
         print("🤖 Бот запускается...")
         print("✅ База данных готова")
