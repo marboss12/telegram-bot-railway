@@ -59,6 +59,7 @@ class DatingBot:
             CREATE TABLE IF NOT EXISTS profiles (
                 profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
+                name TEXT,
                 photo_id TEXT,
                 gender TEXT,
                 faculty TEXT,
@@ -153,7 +154,9 @@ class DatingBot:
         elif update.message.chat.id in self.user_states:
             # Обработка состояний при создании анкеты
             state = self.user_states[update.message.chat.id]['step']
-            if state == 'waiting_age':
+            if state == 'waiting_name':
+                await self.handle_name(update, context)
+            elif state == 'waiting_age':
                 await self.handle_age(update, context)
             elif state == 'waiting_bio':
                 await self.handle_bio(update, context)
@@ -176,8 +179,29 @@ class DatingBot:
             )
             return
         
-        self.user_states[user_id] = {'step': 'waiting_photo'}
-        await update.message.reply_text("📸 Пришлите ваше фото для анкеты:")
+        self.user_states[user_id] = {'step': 'waiting_name'}
+        await update.message.reply_text("👤 Введите ваше имя (как вас будут видеть другие пользователи):")
+
+    async def handle_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик ввода имени"""
+        user_id = update.effective_user.id
+        
+        if user_id not in self.user_states or self.user_states[user_id]['step'] != 'waiting_name':
+            return
+        
+        name = update.message.text.strip()
+        
+        if len(name) < 2:
+            await update.message.reply_text("Имя должно содержать минимум 2 символа. Попробуйте снова:")
+            return
+        
+        if len(name) > 50:
+            await update.message.reply_text("Имя слишком длинное. Максимум 50 символов. Попробуйте снова:")
+            return
+        
+        self.user_states[user_id]['name'] = name
+        self.user_states[user_id]['step'] = 'waiting_photo'
+        await update.message.reply_text(f"✅ Имя сохранено: {name}\n\n📸 Теперь пришлите ваше фото для анкеты:")
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик фотографий"""
@@ -265,10 +289,11 @@ class DatingBot:
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO profiles (user_id, photo_id, gender, faculty, age, bio)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO profiles (user_id, name, photo_id, gender, faculty, age, bio)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             user_id, 
+            profile_data['name'],
             profile_data['photo_id'], 
             profile_data['gender'], 
             profile_data['faculty'], 
@@ -305,36 +330,36 @@ class DatingBot:
             conn.close()
             return
         
-        # Ищем случайную анкету (кроме своей)
+        # Ищем случайную анкету (кроме своей и уже оцененных)
         cursor.execute('''
-            SELECT * FROM profiles 
-            WHERE user_id != ? AND is_active = TRUE 
+            SELECT p.*, u.username 
+            FROM profiles p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            WHERE p.user_id != ? 
+            AND p.is_active = TRUE 
+            AND p.profile_id NOT IN (
+                SELECT to_profile_id FROM likes WHERE from_user_id = ?
+            )
             ORDER BY RANDOM() LIMIT 1
-        ''', (user_id,))
-        profile = cursor.fetchone()
+        ''', (user_id, user_id))
+        
+        result = cursor.fetchone()
         conn.close()
         
-        if not profile:
+        if not result:
             await update.message.reply_text(
-                "😔 Пока нет анкет для просмотра.\n"
-                "Попробуйте позже!",
+                "😔 Вы просмотрели все анкеты!\n"
+                "Попробуйте позже или настройки могут измениться.",
                 reply_markup=self.get_main_menu_keyboard()
             )
             return
         
-        profile_id, profile_user_id, photo_id, gender, faculty, age, bio, is_active, created_at = profile
-        
-        # Получаем информацию о пользователе
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        cursor.execute('SELECT username, first_name FROM users WHERE user_id = ?', (profile_user_id,))
-        user_info = cursor.fetchone()
-        conn.close()
-        
-        username, first_name = user_info if user_info else (None, None)
+        # Распаковываем результат
+        (profile_id, profile_user_id, name, photo_id, gender, 
+         faculty, age, bio, is_active, created_at, username) = result
         
         gender_emoji = "👨" if gender == "male" else "👩"
-        display_name = first_name or username or "Пользователь"
+        display_name = name or "Пользователь"
         
         caption = (
             f"{gender_emoji} {display_name}\n"
@@ -344,14 +369,18 @@ class DatingBot:
         )
         
         # Сохраняем текущий профиль в контексте
-        context.user_data['current_profile'] = profile_id
+        context.user_data['current_profile'] = {
+            'profile_id': profile_id,
+            'user_id': profile_user_id,
+            'username': username
+        }
         
+        # Только кнопки лайк/дизлайк (без кнопки "следующая")
         keyboard = [
             [
-                InlineKeyboardButton("❤️", callback_data="like"),
-                InlineKeyboardButton("👎", callback_data="dislike")
-            ],
-            [InlineKeyboardButton("⏭️ Следующая анкета", callback_data="skip")]
+                InlineKeyboardButton("❤️ Лайк", callback_data="like"),
+                InlineKeyboardButton("👎 Дизлайк", callback_data="dislike")
+            ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -368,11 +397,15 @@ class DatingBot:
         
         user_id = query.from_user.id
         action = query.data
-        current_profile_id = context.user_data.get('current_profile')
         
-        if not current_profile_id:
+        current_profile = context.user_data.get('current_profile')
+        if not current_profile:
             await query.edit_message_text("Произошла ошибка. Попробуйте снова.")
             return
+        
+        profile_id = current_profile['profile_id']
+        profile_user_id = current_profile['user_id']
+        username = current_profile['username']
         
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
@@ -382,59 +415,98 @@ class DatingBot:
             cursor.execute('''
                 INSERT OR REPLACE INTO likes (from_user_id, to_profile_id, is_like)
                 VALUES (?, ?, ?)
-            ''', (user_id, current_profile_id, True))
+            ''', (user_id, profile_id, True))
             
-            await query.edit_message_text("❤️ Вы поставили лайк!")
+            conn.commit()
+            
+            # Проверяем, взаимный ли это лайк
+            cursor.execute('''
+                SELECT 1 FROM likes 
+                WHERE from_user_id = ? AND to_profile_id = ? AND is_like = TRUE
+            ''', (profile_user_id, profile_id))
+            
+            is_mutual = cursor.fetchone()
+            
+            if is_mutual:
+                # Взаимный лайк - показываем ссылку
+                if username:
+                    message_text = (
+                        f"💝 Это взаимный лайк!\n\n"
+                        f"Вы можете написать пользователю: @{username}\n\n"
+                        f"Перейти в диалог: https://t.me/{username}"
+                    )
+                else:
+                    # Если у пользователя нет username, используем его ID
+                    message_text = (
+                        f"💝 Это взаимный лайк!\n\n"
+                        f"ID пользователя: {profile_user_id}\n"
+                        f"Чтобы написать, скопируйте этот ID и используйте поиск в Telegram"
+                    )
+            else:
+                # Не взаимный лайк
+                message_text = "❤️ Вы поставили лайк!"
+                
+                if username:
+                    message_text += f"\n\nСсылка на пользователя: @{username}"
+                    message_text += f"\nhttps://t.me/{username}"
+                
+            await query.edit_message_text(message_text)
+            
+            # После лайка сразу показываем следующую анкету
+            await self.show_next_profile(query, context)
                 
         elif action == 'dislike':
             # Сохраняем дизлайк
             cursor.execute('''
                 INSERT OR REPLACE INTO likes (from_user_id, to_profile_id, is_like)
                 VALUES (?, ?, ?)
-            ''', (user_id, current_profile_id, False))
+            ''', (user_id, profile_id, False))
+            
+            conn.commit()
+            conn.close()
+            
             await query.edit_message_text("👎 Вы поставили дизлайк")
-        
-        conn.commit()
-        conn.close()
-        
-        # Показываем следующую анкету
-        await self.find_profile_by_message(query, context)
+            
+            # После дизлайка сразу показываем следующую анкету
+            await self.show_next_profile(query, context)
 
-    async def find_profile_by_message(self, query, context: ContextTypes.DEFAULT_TYPE):
+    async def show_next_profile(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Показать следующую анкету после действия"""
         user_id = query.from_user.id
         
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        # Ищем случайную анкету (кроме своей)
+        # Ищем случайную анкету (кроме своей и уже оцененных)
         cursor.execute('''
-            SELECT * FROM profiles 
-            WHERE user_id != ? AND is_active = TRUE 
-            ORDER BY RANDOM() LIMIT 1
-        ''', (user_id,))
-        profile = cursor.fetchone()
-        
-        if not profile:
-            await query.message.reply_text(
-                "😔 Пока нет новых анкет для просмотра.\n"
-                "Попробуйте позже!",
-                reply_markup=self.get_main_menu_keyboard()
+            SELECT p.*, u.username 
+            FROM profiles p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            WHERE p.user_id != ? 
+            AND p.is_active = TRUE 
+            AND p.profile_id NOT IN (
+                SELECT to_profile_id FROM likes WHERE from_user_id = ?
             )
-            conn.close()
-            return
+            ORDER BY RANDOM() LIMIT 1
+        ''', (user_id, user_id))
         
-        profile_id, profile_user_id, photo_id, gender, faculty, age, bio, is_active, created_at = profile
-        
-        # Получаем информацию о пользователе
-        cursor.execute('SELECT username, first_name FROM users WHERE user_id = ?', (profile_user_id,))
-        user_info = cursor.fetchone()
+        result = cursor.fetchone()
         conn.close()
         
-        username, first_name = user_info if user_info else (None, None)
+        if not result:
+            await query.message.reply_text(
+                "😔 Вы просмотрели все доступные анкеты!\n"
+                "Возвращайтесь позже, когда появятся новые анкеты.",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            return
+        
+        # Распаковываем результат
+        (profile_id, profile_user_id, name, photo_id, gender, 
+         faculty, age, bio, is_active, created_at, username) = result
         
         gender_emoji = "👨" if gender == "male" else "👩"
-        display_name = first_name or username or "Пользователь"
+        display_name = name or "Пользователь"
         
         caption = (
             f"{gender_emoji} {display_name}\n"
@@ -444,14 +516,18 @@ class DatingBot:
         )
         
         # Сохраняем текущий профиль в контексте
-        context.user_data['current_profile'] = profile_id
+        context.user_data['current_profile'] = {
+            'profile_id': profile_id,
+            'user_id': profile_user_id,
+            'username': username
+        }
         
+        # Только кнопки лайк/дизлайк
         keyboard = [
             [
-                InlineKeyboardButton("❤️", callback_data="like"),
-                InlineKeyboardButton("👎", callback_data="dislike")
-            ],
-            [InlineKeyboardButton("⏭️ Следующая анкета", callback_data="skip")]
+                InlineKeyboardButton("❤️ Лайк", callback_data="like"),
+                InlineKeyboardButton("👎 Дизлайк", callback_data="dislike")
+            ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -470,13 +546,15 @@ class DatingBot:
         
         # Находим взаимные лайки
         cursor.execute('''
-            SELECT u.username, u.first_name, p.faculty, p.bio 
+            SELECT p.name, u.username, p.faculty, p.bio, u.user_id
             FROM likes l1
-            JOIN likes l2 ON l1.to_profile_id = l2.to_profile_id
+            JOIN likes l2 ON l1.to_profile_id = l2.from_user_id
             JOIN profiles p ON l2.from_user_id = p.user_id
             JOIN users u ON p.user_id = u.user_id
-            WHERE l1.from_user_id = ? AND l2.from_user_id = p.user_id
-            AND l1.is_like = TRUE AND l2.is_like = TRUE
+            WHERE l1.from_user_id = ? 
+            AND l2.to_profile_id = l1.from_user_id
+            AND l1.is_like = TRUE 
+            AND l2.is_like = TRUE
         ''', (user_id,))
         
         matches = cursor.fetchall()
@@ -492,12 +570,20 @@ class DatingBot:
         
         match_text = "💝 Ваши мэтчи:\n\n"
         for match in matches:
-            username, first_name, faculty, bio = match
-            name = first_name or username or "Пользователь"
-            match_text += f"👤 {name}\n"
+            name, username, faculty, bio, match_user_id = match
+            display_name = name or username or "Пользователь"
+            
+            match_text += f"👤 {display_name}\n"
             match_text += f"🎓 Факультет: {faculty}\n"
             match_text += f"📝 {bio}\n"
-            match_text += f"💬 Написать: @{username}\n\n" if username else "\n"
+            
+            if username:
+                match_text += f"💬 Написать: @{username}\n"
+                match_text += f"🔗 Ссылка: https://t.me/{username}\n"
+            else:
+                match_text += f"🆔 ID пользователя: {match_user_id}\n"
+            
+            match_text += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
         await update.message.reply_text(
             match_text,
@@ -521,11 +607,12 @@ class DatingBot:
             )
             return
         
-        profile_id, user_id, photo_id, gender, faculty, age, bio, is_active, created_at = profile
+        profile_id, user_id, name, photo_id, gender, faculty, age, bio, is_active, created_at = profile
         gender_text = "Мужской" if gender == "male" else "Женский"
         
         caption = (
             f"👤 Ваша анкета:\n\n"
+            f"📛 Имя: {name}\n"
             f"🎓 Факультет: {faculty}\n"
             f"👫 Пол: {gender_text}\n"
             f"📅 Возраст: {age}\n"
@@ -567,7 +654,7 @@ class DatingBot:
         # Обработчики callback-запросов
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern="^gender_"))
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern="^faculty_"))
-        application.add_handler(CallbackQueryHandler(self.handle_like, pattern="^(like|dislike|skip)$"))
+        application.add_handler(CallbackQueryHandler(self.handle_like, pattern="^(like|dislike)$"))
 
         print("🤖 Бот запускается...")
         print("✅ База данных готова")
