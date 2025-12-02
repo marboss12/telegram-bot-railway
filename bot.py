@@ -18,8 +18,8 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 # Список факультетов
 FACULTIES = {
     "ФН": "Фундаментальные науки",
-    "РЛ": "Радиолокация и радионавигация",
-    "РК": "Ракетно-космическая техника",
+    "РЛ": "Радиоэлектроника и лазерная техника",
+    "РК": "Робототехника и комплексная автоматизация",
     "ИБМ": "Инженерный бизнес и менеджмент",
     "ИУ": "Информатика и системы управления", 
     "СМ": "Специальное машиностроение",
@@ -140,7 +140,23 @@ class DatingBot:
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
         text = update.message.text
+        user_id = update.effective_user.id
         
+        # Проверяем, находится ли пользователь в процессе создания анкеты
+        if user_id in self.user_states:
+            state = self.user_states[user_id].get('step')
+            
+            if state == 'waiting_name':
+                await self.handle_name(update, context)
+                return
+            elif state == 'waiting_age':
+                await self.handle_age(update, context)
+                return
+            elif state == 'waiting_bio':
+                await self.handle_bio(update, context)
+                return
+        
+        # Если не в процессе создания анкеты, обрабатываем команды меню
         if text == "👤 Создать анкету":
             await self.start_create_profile(update, context)
         elif text == "🔍 Найти анкету":
@@ -151,15 +167,6 @@ class DatingBot:
             await self.show_my_profile(update, context)
         elif text == "❌ Удалить анкету":
             await self.delete_profile(update, context)
-        elif update.message.chat.id in self.user_states:
-            # Обработка состояний при создании анкеты
-            state = self.user_states[update.message.chat.id]['step']
-            if state == 'waiting_name':
-                await self.handle_name(update, context)
-            elif state == 'waiting_age':
-                await self.handle_age(update, context)
-            elif state == 'waiting_bio':
-                await self.handle_bio(update, context)
 
     async def start_create_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начало создания анкеты"""
@@ -186,7 +193,7 @@ class DatingBot:
         """Обработчик ввода имени"""
         user_id = update.effective_user.id
         
-        if user_id not in self.user_states or self.user_states[user_id]['step'] != 'waiting_name':
+        if user_id not in self.user_states or self.user_states[user_id].get('step') != 'waiting_name':
             return
         
         name = update.message.text.strip()
@@ -207,7 +214,7 @@ class DatingBot:
         """Обработчик фотографий"""
         user_id = update.effective_user.id
         
-        if user_id not in self.user_states or self.user_states[user_id]['step'] != 'waiting_photo':
+        if user_id not in self.user_states or self.user_states[user_id].get('step') != 'waiting_photo':
             return
         
         photo_file = await update.message.photo[-1].get_file()
@@ -251,7 +258,9 @@ class DatingBot:
         """Обработчик ввода возраста"""
         user_id = update.effective_user.id
         
-        if user_id not in self.user_states or self.user_states[user_id]['step'] != 'waiting_age':
+        # Проверяем состояние
+        if user_id not in self.user_states or self.user_states[user_id].get('step') != 'waiting_age':
+            # Если не ожидаем возраст, игнорируем сообщение
             return
         
         try:
@@ -276,7 +285,8 @@ class DatingBot:
         user_id = update.effective_user.id
         bio = update.message.text
         
-        if user_id not in self.user_states or self.user_states[user_id]['step'] != 'waiting_bio':
+        # Проверяем состояние
+        if user_id not in self.user_states or self.user_states[user_id].get('step') != 'waiting_bio':
             return
         
         if len(bio) > 500:
@@ -288,29 +298,39 @@ class DatingBot:
         
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO profiles (user_id, name, photo_id, gender, faculty, age, bio)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user_id, 
-            profile_data['name'],
-            profile_data['photo_id'], 
-            profile_data['gender'], 
-            profile_data['faculty'], 
-            profile_data['age'], 
-            bio
-        ))
-        conn.commit()
-        conn.close()
         
-        # Очищаем состояние
-        del self.user_states[user_id]
-        
-        await update.message.reply_text(
-            "✅ Ваша анкета успешно создана!\n\n"
-            "Теперь вы можете искать других пользователей.",
-            reply_markup=self.get_main_menu_keyboard()
-        )
+        try:
+            cursor.execute('''
+                INSERT INTO profiles (user_id, name, photo_id, gender, faculty, age, bio)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user_id, 
+                profile_data.get('name', ''),
+                profile_data.get('photo_id', ''), 
+                profile_data.get('gender', ''), 
+                profile_data.get('faculty', ''), 
+                profile_data.get('age', 0), 
+                bio
+            ))
+            conn.commit()
+            
+            # Очищаем состояние
+            del self.user_states[user_id]
+            
+            await update.message.reply_text(
+                "✅ Ваша анкета успешно создана!\n\n"
+                "Теперь вы можете искать других пользователей.",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении анкеты: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при создании анкеты. Попробуйте снова.",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+        finally:
+            conn.close()
 
     async def find_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Поиск случайной анкеты"""
@@ -321,16 +341,18 @@ class DatingBot:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM profiles WHERE user_id = ? AND is_active = TRUE', (user_id,))
         user_profile = cursor.fetchone()
+        conn.close()
         
         if not user_profile:
             await update.message.reply_text(
                 "Сначала создайте свою анкету!",
                 reply_markup=self.get_main_menu_keyboard()
             )
-            conn.close()
             return
         
         # Ищем случайную анкету (кроме своей и уже оцененных)
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
         cursor.execute('''
             SELECT p.*, u.username 
             FROM profiles p
